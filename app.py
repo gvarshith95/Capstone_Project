@@ -1,17 +1,22 @@
 import streamlit as st
 from openai import OpenAI
 import PyPDF2
-import re
+import json
+from sendgrid import SendGridAPIClient
+from sendgrid.helpers.mail import Mail
 
+# -------------------------
 # Initialize OpenAI client
+# -------------------------
 client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
 
 st.set_page_config(page_title="Recruit-AI", layout="centered")
 st.title("Recruit-AI: Resume Screening Assistant")
 st.write("Upload a Job Description and Resume to generate an AI-driven screening report.")
 
+
 # -------------------------
-# Helper: Read PDF or Text
+# Helper: Read PDF or Text File
 # -------------------------
 def read_file(uploaded_file):
     if uploaded_file.type == "application/pdf":
@@ -26,48 +31,57 @@ def read_file(uploaded_file):
 
 
 # -------------------------
-# Helper: Extract sections from AI output
+# Helper: Send Email (SendGrid)
 # -------------------------
-def extract_section(label, text):
-    pattern = rf"\*\*{label}.*?\*\*:(.*?)(?=\*\*|$)"
-    match = re.search(pattern, text, re.DOTALL | re.IGNORECASE)
-    return match.group(1).strip() if match else "Not provided."
+def send_email(to_email, subject, content):
+    try:
+        message = Mail(
+            from_email=st.secrets["SENDER_EMAIL"],
+            to_emails=to_email,
+            subject=subject,
+            html_content=content.replace("\n", "<br>")
+        )
+        sg = SendGridAPIClient(st.secrets["SENDGRID_API_KEY"])
+        response = sg.send(message)
+        return response.status_code
+    except Exception as e:
+        return str(e)
 
 
 # -------------------------
-# File Upload UI
+# Upload Inputs
 # -------------------------
 jd = st.file_uploader("Upload Job Description (JD)", type=["pdf", "txt"])
 resume = st.file_uploader("Upload Resume", type=["pdf", "txt"])
 
+
 # -------------------------
-# Main Process Button
+# Analyze Button
 # -------------------------
 if st.button("Analyze Candidate"):
     if not jd or not resume:
         st.error("Please upload both Job Description and Resume.")
     else:
         with st.spinner("Analyzing with Recruit-AI..."):
-
             jd_text = read_file(jd)
             resume_text = read_file(resume)
 
+            # -------------------------
+            # JSON Prompt
+            # -------------------------
             prompt = f"""
-            You are an HR AI Assistant. Compare the following Resume with the Job Description.
+            You are an HR AI assistant. Return ONLY valid JSON.
 
-            Return the response in this EXACT STRUCTURE:
+            Use this EXACT structure:
 
-            **Fit Score (0-100):**
-            <score>
+            {{
+              "fit_score": <number>,
+              "summary": "<3-5 bullet points>",
+              "action": "<Interview | Hold | Reject>",
+              "email": "<outreach email draft>"
+            }}
 
-            **Candidate Summary:**
-            <3-5 bullet points>
-
-            **Recommended Action (Interview / Hold / Reject):**
-            <action>
-
-            **Draft Outreach Email (if Interview Recommended):**
-            <email text>
+            Do not add explanations. Do not add text outside JSON.
 
             -------------------------
             Job Description:
@@ -83,43 +97,70 @@ if st.button("Analyze Candidate"):
                     messages=[{"role": "user", "content": prompt}]
                 )
 
-                full_output = response.choices[0].message.content
-
-                # Extract sections
-                fit_score = extract_section("Fit Score", full_output)
-                summary = extract_section("Candidate Summary", full_output)
-                action = extract_section("Recommended Action", full_output)
-                email = extract_section("Draft Outreach Email", full_output)
+                raw_output = response.choices[0].message.content
 
                 # -------------------------
-                # Tabs UI
+                # Parse JSON output safely
+                # -------------------------
+                try:
+                    data = json.loads(raw_output)
+                except:
+                    st.error("AI did not return valid JSON. Showing raw output.")
+                    st.write(raw_output)
+                    st.stop()
+
+                fit_score = data.get("fit_score")
+                summary = data.get("summary", "")
+                action = data.get("action", "")
+                email = data.get("email", "")
+
+                # -------------------------
+                # Display Results in Tabs
                 # -------------------------
                 tab1, tab2, tab3, tab4 = st.tabs(
                     ["📊 Screening Score", "📝 Summary", "🎯 Recommended Action", "✉️ Email Draft"]
                 )
 
+                # --- Screening Tab
                 with tab1:
                     st.subheader("Screening Score")
-                    st.write(f"**Candidate Fit Score:** {fit_score}")
 
-                    # Show numeric score bar if it's valid
-                    try:
-                        score_value = int(re.findall(r"\d+", fit_score)[0])
-                        st.progress(score_value / 100)
-                    except:
-                        st.info("Score not formatted as a number.")
+                    if isinstance(fit_score, int):
+                        st.write(f"**Candidate Fit Score:** {fit_score}")
+                        st.progress(fit_score / 100)
+                    else:
+                        st.warning("Score not provided or not a valid number.")
 
+                # --- Summary Tab
                 with tab2:
                     st.subheader("Candidate Summary")
                     st.markdown(summary)
 
+                # --- Action Tab
                 with tab3:
                     st.subheader("Recommended Action")
-                    st.markdown(action)
+                    st.markdown(f"### {action}")
 
+                # --- Email Draft Tab
                 with tab4:
                     st.subheader("Email Draft")
-                    st.markdown(email)
+                    editable_email = st.text_area("Edit email before sending:", email, height=250)
+
+                    recipient = st.text_input("Recipient Email")
+
+                    if st.button("Send Email"):
+                        if not recipient:
+                            st.error("Please enter the candidate's email address.")
+                        else:
+                            status = send_email(
+                                to_email=recipient,
+                                subject="Interview Invitation - Recruit-AI",
+                                content=editable_email
+                            )
+                            if str(status).startswith("2"):
+                                st.success("Email sent successfully!")
+                            else:
+                                st.error(f"Failed to send email. Error: {status}")
 
             except Exception as e:
                 st.error("Error while connecting to the AI model.")
