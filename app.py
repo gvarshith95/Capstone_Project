@@ -31,6 +31,25 @@ def read_file(uploaded_file):
 
 
 # -------------------------
+# Helper: Repair AI JSON Output
+# -------------------------
+def repair_json(bad_json_string):
+    """
+    Fix common JSON formatting issues caused by LLM output.
+    """
+    cleaned = bad_json_string.replace("```", "").replace("json", "")
+    cleaned = cleaned.replace("\t", " ").strip()
+
+    # Remove trailing commas
+    cleaned = cleaned.replace(",}", "}").replace(",]", "]")
+
+    # Ensure no illegal ASCII characters
+    cleaned = "".join(ch for ch in cleaned if ord(ch) >= 32)
+
+    return cleaned
+
+
+# -------------------------
 # Helper: Send Email (SendGrid)
 # -------------------------
 def send_email(to_email, subject, content):
@@ -71,17 +90,16 @@ if st.button("Analyze Candidate"):
             # -------------------------
             prompt = f"""
             You are an HR AI assistant. Return ONLY valid JSON.
-
-            Use this EXACT structure:
+            Use this exact format:
 
             {{
               "fit_score": <number>,
               "summary": "<3-5 bullet points>",
               "action": "<Interview | Hold | Reject>",
-              "email": "<outreach email draft>"
+              "email": "<email draft>"
             }}
 
-            Do not add explanations. Do not add text outside JSON.
+            Do NOT include explanations or markdown, only JSON.
 
             -------------------------
             Job Description:
@@ -92,6 +110,7 @@ if st.button("Analyze Candidate"):
             """
 
             try:
+                # Call LLM
                 response = client.chat.completions.create(
                     model="gpt-4o-mini",
                     messages=[{"role": "user", "content": prompt}]
@@ -100,13 +119,15 @@ if st.button("Analyze Candidate"):
                 raw_output = response.choices[0].message.content
 
                 # -------------------------
-                # Parse JSON output safely
+                # Clean & parse JSON
                 # -------------------------
+                cleaned_json = repair_json(raw_output)
+
                 try:
-                    data = json.loads(raw_output)
+                    data = json.loads(cleaned_json)
                 except:
-                    st.error("AI did not return valid JSON. Showing raw output.")
-                    st.write(raw_output)
+                    st.error("AI returned malformed JSON. Here is the raw output:")
+                    st.code(raw_output)
                     st.stop()
 
                 fit_score = data.get("fit_score")
@@ -144,6 +165,7 @@ if st.button("Analyze Candidate"):
                 # --- Email Draft Tab
                 with tab4:
                     st.subheader("Email Draft")
+
                     editable_email = st.text_area("Edit email before sending:", email, height=250)
 
                     recipient = st.text_input("Recipient Email")
@@ -163,5 +185,5 @@ if st.button("Analyze Candidate"):
                                 st.error(f"Failed to send email. Error: {status}")
 
             except Exception as e:
-                st.error("Error while connecting to the AI model.")
+                st.error("Error connecting to the AI model.")
                 st.text(str(e))
